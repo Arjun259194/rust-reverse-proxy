@@ -1,0 +1,22 @@
+server:
+  host: "127.0.0.1"
+  port: 8080
+  cors: "*"
+  logging: "INFO"
+
+records:
+  - path: "/api/users"
+    target: "http://localhost:3001"
+    methods: 
+      - "GET"
+    rewrite: "/users"
+    remove_request_headers: ["x-secret"]
+    add_response_headers:
+      x-powered-by: "RustGateway"
+
+  - path: "/api/posts"
+    target: "http://localhost:3002"
+    methods:
+      - "POST"
+
+
