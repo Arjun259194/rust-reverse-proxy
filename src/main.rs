@@ -1,117 +1,110 @@
+mod proxy;
+use crate::proxy::{Config, HandlerErr};
+
 use axum::{
     Router,
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    http::{HeaderMap, HeaderValue, StatusCode},
+    response::{IntoResponse, Response},
     routing::any,
 };
-use serde::Deserialize;
-use std::{collections::HashMap, env, fs::File, io::BufReader, process, sync::Arc};
+use reqwest::{self, Client, Method, header::CONTENT_TYPE};
+use serde_json::json;
+use std::{env, sync::Arc};
 
-#[derive(Debug, Deserialize)]
-pub struct Config {
-    pub server: Server,
-    pub records: Vec<Record>,
+#[derive(Debug, Clone)]
+struct AppState {
+    config: Config,
+    client: Client,
 }
 
-impl Config {
-    pub fn new(path: Option<&str>) -> Config {
-        let path = match path {
-            None => "config.yaml",
-            Some(path) => path,
+impl AppState {
+    fn new() -> AppState {
+        let arguments: Vec<String> = env::args().collect();
+        let path: Option<&str> = if arguments.len() > 1 {
+            Some(&arguments[1])
+        } else {
+            None
         };
-        let file = match File::open(path) {
-            Ok(file) => file,
-            Err(err) => {
-                eprintln!(
-                    "Can't open the config.yaml file\nCheck if the file exits or not\n\nIf file exists move it to the config directory or pass the path to config file as argument."
-                );
-                eprintln!("{err}");
-                process::exit(1)
-            }
-        };
-        let reader = BufReader::new(file);
-
-        match serde_yaml::from_reader::<_, Config>(reader) {
-            Err(err) => {
-                eprintln!(
-                    "Can't parse the config.yaml file\nCheck for syntax error and double check the content of config file"
-                );
-                eprintln!("{err}");
-                process::exit(1);
-            }
-            Ok(config) => config,
+        let config = Config::new(path);
+        AppState {
+            config,
+            client: Client::new(),
         }
     }
 }
 
-#[derive(Debug, Deserialize)]
-pub struct Server {
-    pub port: String,
-    pub host: String,
-    pub cors: Option<String>,
-    pub logging: Option<LogginLevel>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "UPPERCASE")]
-pub enum HttpMethods {
-    GET,
-    POST,
-    PUT,
-    DELETE,
-}
-
-#[derive(Deserialize, Debug)]
-#[serde(rename_all = "UPPERCASE")]
-pub enum LogginLevel {
-    INFO,
-    TRACE,
-    DEBUG,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct Record {
-    pub path: String,
-    pub target: String,
-    pub methods: Vec<HttpMethods>,
-    pub rewrite: Option<String>,
-    pub remove_request_headers: Option<Vec<String>>,
-    pub add_response_headers: Option<HashMap<String, String>>,
-}
-
 #[tokio::main]
 async fn main() {
-    let arguments: Vec<String> = env::args().collect();
-    let path: Option<&str> = if arguments.len() > 1 {
-        Some(&arguments[1])
-    } else {
-        None
-    };
-    let config = Arc::new(Config::new(path));
-
+    let state = Arc::new(AppState::new());
     let router = Router::new()
-        .route("/{*rest}", any(handler))
-        .with_state(config.clone());
+        .route("/{*path}", any(handler))
+        .with_state(state.clone());
 
-    let addr = format!("{0}:{1}", config.server.host, config.server.port);
-
+    let addr = format!(
+        "{0}:{1}",
+        state.config.server.host, state.config.server.port
+    );
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
 
     println!("Proxy running on {0}", &addr);
     axum::serve(listener, router).await.unwrap();
 }
 
-async fn handler(State(config): State<Arc<Config>>, Path(rest): Path<String>) -> impl IntoResponse {
-    for record in config.records.iter() {
-        if format!("/{rest}") == record.path {
-            return (StatusCode::OK, HeaderMap::new(), format!("Redirecting...")).into_response();
-        }
+fn format_path(path: &str) -> String {
+    if path.ends_with("/") {
+        let mut x = format!("/{path}");
+        let _ = &x.pop().unwrap();
+        x
+    } else {
+        format!("/{path}")
     }
-    (
-        StatusCode::NOT_FOUND,
-        HeaderMap::new(),
-        format!("You hit path: {}\n\nconfig:{:?}", rest, config),
+}
+
+async fn handler(
+    method: Method,
+    Path(path): Path<String>,
+    header: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> Result<Response, HandlerErr> {
+    let mut response_header = HeaderMap::new();
+    response_header.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_str("application/json").unwrap(),
+    );
+
+    println!("{method}");
+
+    let fmt_path = format_path(&path);
+
+    let Some(record) = state.config.records.get(&fmt_path) else {
+        eprintln!("Can't find a record");
+        return Err(HandlerErr::NOTFOUND);
+    };
+
+    if !record.methods.contains(&method) {
+        eprintln!("Method not supporting incoming method!");
+        return Err(HandlerErr::BADREQUEST("Method not supported".to_string()));
+    }
+
+    let request = match record.get_request(&fmt_path, method, &header).await {
+        Ok(r) => r,
+        Err(err) => {
+            eprintln!("Error while building proxy request: {:?}", err);
+            return Err(HandlerErr::INTERNALERROR(
+                "Error while building proxy request".to_string(),
+            ));
+        }
+    };
+
+    Ok((
+        StatusCode::OK,
+        response_header,
+        json!({
+            "status": "OK",
+            "redirecting_to": record.target.to_string(),
+        })
+        .to_string(),
     )
-        .into_response()
+        .into_response())
 }
