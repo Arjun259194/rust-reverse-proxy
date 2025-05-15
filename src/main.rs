@@ -3,14 +3,15 @@ use crate::proxy::{Config, HandlerErr};
 
 use axum::{
     Router,
+    body::Body,
     extract::{Path, State},
-    http::{HeaderMap, HeaderValue, StatusCode},
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::any,
 };
 use reqwest::{self, Client, Method, header::CONTENT_TYPE};
 use serde_json::json;
-use std::{env, sync::Arc};
+use std::{env, str::FromStr, sync::Arc};
 
 #[derive(Debug, Clone)]
 struct AppState {
@@ -36,6 +37,7 @@ impl AppState {
 
 #[tokio::main]
 async fn main() {
+    // v1 ready, test it and check it then commit it
     let state = Arc::new(AppState::new());
     let router = Router::new()
         .route("/{*path}", any(handler))
@@ -67,14 +69,6 @@ async fn handler(
     header: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> Result<Response, HandlerErr> {
-    let mut response_header = HeaderMap::new();
-    response_header.insert(
-        CONTENT_TYPE,
-        HeaderValue::from_str("application/json").unwrap(),
-    );
-
-    println!("{method}");
-
     let fmt_path = format_path(&path);
 
     let Some(record) = state.config.records.get(&fmt_path) else {
@@ -97,14 +91,38 @@ async fn handler(
         }
     };
 
-    Ok((
-        StatusCode::OK,
-        response_header,
-        json!({
-            "status": "OK",
-            "redirecting_to": record.target.to_string(),
-        })
-        .to_string(),
-    )
-        .into_response())
+    let proxy_response = match state.client.execute(request).await {
+        Ok(response) => response,
+        Err(err) => {
+            eprintln!("{:?}", err);
+            return Err(HandlerErr::INTERNALERROR(err.to_string()));
+        }
+    };
+
+    let status = proxy_response.status();
+    let mut proxy_res_headers = proxy_response.headers().clone();
+    let bytes = match proxy_response.bytes().await {
+        Ok(b) => b,
+        Err(err) => {
+            eprintln!("{err}");
+            return Err(HandlerErr::INTERNALERROR(err.to_string()));
+        }
+    };
+
+    if let Some(add_on) = &record.add_response_headers {
+        for (key, val) in add_on {
+            if let (Ok(key), Ok(val)) = (HeaderName::from_str(key), HeaderValue::from_str(val)) {
+                proxy_res_headers.insert(key, val);
+            }
+        }
+    }
+
+    let mut response = Response::builder()
+        .status(status)
+        .body(Body::from(bytes))
+        .unwrap();
+
+    *response.headers_mut() = proxy_res_headers;
+
+    Ok(response)
 }

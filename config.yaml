@@ -5,17 +5,18 @@ server:
   logging: "INFO"
 
 records:
-  "/api/users":
-     target: "http://localhost:3001"
+  "/users":
+     target: "http://localhost:8081"
      methods: 
       - "GET"
-      - "POST"
-     rewrite: "/users"
+     rewrite: "/user"
      remove_request_headers: ["x-secret", "user-agent"]
      add_response_headers:
        x-powered-by: "RustGateway"
 
-  "/api/posts":
-      target: "http://localhost:3002"
+  "/chat":
+      target: "http://localhost:8082"
+      rewrite: "/chats"
       methods:
         - "POST"
+

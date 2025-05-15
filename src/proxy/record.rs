@@ -45,18 +45,6 @@ impl Record {
             }
         }
 
-        if let Some(to_add) = &self.add_response_headers {
-            for (key, value) in to_add {
-                if let (Ok(key), Ok(value)) =
-                    (HeaderName::from_str(key), HeaderValue::from_str(value))
-                {
-                    proxy_headers.insert(key, value);
-                }
-            }
-        }
-
-        println!("{:?}", proxy_headers);
-
         Ok(Client::new()
             .request(method, url)
             .headers(proxy_headers)
