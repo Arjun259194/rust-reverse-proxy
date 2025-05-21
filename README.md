@@ -41,11 +41,27 @@ docker-compose up --build
 The proxy is configured using a `config.yaml` file located at the root of the project. Below is an example configuration:
 
 ```yaml
-routes:
-  - path: /api
-    upstream: http://localhost:3001
-  - path: /auth
-    upstream: http://localhost:3002
+server:
+  host: "127.0.0.1"
+  port: 8080
+  cors: "*"
+  logging: "INFO"
+
+records:
+  "/users":
+     target: "http://localhost:8081"
+     methods: 
+      - "GET"
+     rewrite: "/user"
+     remove_request_headers: ["x-secret", "user-agent"]
+     add_response_headers:
+       x-powered-by: "RustGateway"
+
+  "/chat":
+      target: "http://localhost:8082"
+      rewrite: "/chats"
+      methods:
+        - "POST"
 ```
 
 Each route specifies a `path` to match incoming requests and an `upstream` URL to which the requests will be forwarded.
@@ -53,14 +69,13 @@ Each route specifies a `path` to match incoming requests and an `upstream` URL t
 ## 📂 Project Structure
 
 ```
-rust-reverse-proxy/
-├── src/
-│   ├── main.rs
-│   └── ...
-├── config.yaml
-├── compose.yaml
-├── Cargo.toml
-└── ...
+src
+├── main.rs
+└── proxy
+    ├── config.rs
+    ├── error.rs
+    ├── mod.rs
+    └── record.rs
 ```
 
 * `src/`: Contains the Rust source code.
